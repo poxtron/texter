@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -71,7 +72,7 @@ struct Hotkey
 
     public int WinMod {
         get {
-            int m = 0x4000; // MOD_NOREPEAT
+            int m = 0x4000;
             if (Ctrl)  m |= 0x0002;
             if (Alt)   m |= 0x0001;
             if (Shift) m |= 0x0004;
@@ -94,6 +95,11 @@ class AppSettings
     public string ToggleHotkey     = "Ctrl+Shift+5";
     public string CopyCloseKey     = "Shift+Enter";
     public string CancelKey        = "Escape";
+    public string FontFamily       = "Segoe UI";
+    public float  FontSize         = 11f;
+    public Color  TextColor        = Color.FromArgb(212, 212, 212);
+    public Color  BgColor          = Color.FromArgb(28, 28, 28);
+    public int    Transparency     = 97;
 
     public static AppSettings Load()
     {
@@ -105,6 +111,19 @@ class AppSettings
             if (ln.Length > 1) s.ToggleHotkey     = ln[1];
             if (ln.Length > 2) s.CopyCloseKey     = ln[2];
             if (ln.Length > 3) s.CancelKey        = ln[3];
+            if (ln.Length > 4) {
+                var p = ln[4].Split('|');
+                if (p[0].Length > 0) s.FontFamily = p[0];
+                float f;
+                if (p.Length > 1 && float.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out f) && f > 0)
+                    s.FontSize = f;
+            }
+            if (ln.Length > 5) { var c = ParseColor(ln[5]); if (!c.IsEmpty) s.TextColor = c; }
+            if (ln.Length > 6) { var c = ParseColor(ln[6]); if (!c.IsEmpty) s.BgColor   = c; }
+            if (ln.Length > 7) {
+                int t;
+                if (int.TryParse(ln[7], out t) && t >= 10 && t <= 100) s.Transparency = t;
+            }
         } catch { }
         return s;
     }
@@ -115,9 +134,25 @@ class AppSettings
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(FilePath));
             File.WriteAllLines(FilePath, new[] {
                 UseActiveMonitor ? "Active" : "Primary",
-                ToggleHotkey, CopyCloseKey, CancelKey
+                ToggleHotkey, CopyCloseKey, CancelKey,
+                FontFamily + "|" + FontSize.ToString(CultureInfo.InvariantCulture),
+                TextColor.R + "," + TextColor.G + "," + TextColor.B,
+                BgColor.R   + "," + BgColor.G   + "," + BgColor.B,
+                Transparency.ToString()
             });
         } catch { }
+    }
+
+    static Color ParseColor(string s)
+    {
+        var p = s.Split(',');
+        if (p.Length != 3) return Color.Empty;
+        int r, g, b;
+        if (int.TryParse(p[0].Trim(), out r) &&
+            int.TryParse(p[1].Trim(), out g) &&
+            int.TryParse(p[2].Trim(), out b))
+            return Color.FromArgb(r, g, b);
+        return Color.Empty;
     }
 }
 
@@ -149,8 +184,12 @@ class HotkeyBox : TextBox
 
 class SettingsForm : Form
 {
-    readonly RadioButton _rbActive, _rbPrimary;
-    readonly HotkeyBox   _hbToggle, _hbCopyClose, _hbCancel;
+    readonly RadioButton  _rbActive, _rbPrimary;
+    readonly HotkeyBox    _hbToggle, _hbCopyClose, _hbCancel;
+    string        _fontFamily;
+    float         _fontSize;
+    Panel         _swatchText, _swatchBg;
+    NumericUpDown _nudTrans;
 
     public SettingsForm(AppSettings s)
     {
@@ -159,9 +198,10 @@ class SettingsForm : Form
         MaximizeBox = MinimizeBox = false;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(360, 250);
+        ClientSize = new Size(360, 400);
         Font = new Font("Segoe UI", 9);
 
+        // ── Monitor ──────────────────────────────────────────────────────────
         var grpMon = new GroupBox { Text = "Monitor", Left = 12, Top = 8, Width = 336, Height = 72 };
         _rbActive  = new RadioButton { Text = "Active monitor (where the cursor is)", AutoSize = true,
                                        Location = new Point(12, 18), Checked =  s.UseActiveMonitor };
@@ -170,6 +210,7 @@ class SettingsForm : Form
         grpMon.Controls.Add(_rbActive);
         grpMon.Controls.Add(_rbPrimary);
 
+        // ── Keyboard shortcuts ────────────────────────────────────────────────
         var grpKeys = new GroupBox { Text = "Keyboard shortcuts", Left = 12, Top = 90, Width = 336, Height = 112 };
         _hbToggle    = new HotkeyBox { Value = Hotkey.Parse(s.ToggleHotkey) };
         _hbCopyClose = new HotkeyBox { Value = Hotkey.Parse(s.CopyCloseKey) };
@@ -178,6 +219,48 @@ class SettingsForm : Form
         AddRow(grpKeys, "Copy & close", _hbCopyClose, 46);
         AddRow(grpKeys, "Cancel",       _hbCancel,    76);
 
+        // ── Appearance ────────────────────────────────────────────────────────
+        _fontFamily = s.FontFamily;
+        _fontSize   = s.FontSize;
+
+        var grpApp = new GroupBox { Text = "Appearance", Left = 12, Top = 212, Width = 336, Height = 144 };
+
+        var btnFont = new Button {
+            Text = FormatFont(_fontFamily, _fontSize),
+            Width = 190, Height = 23, Location = new Point(130, 18),
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        btnFont.Click += (sender, e) => {
+            using (var dlg = new FontDialog { Font = SafeFont(_fontFamily, _fontSize), ShowEffects = false })
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+                _fontFamily  = dlg.Font.Name;
+                _fontSize    = dlg.Font.Size;
+                btnFont.Text = FormatFont(_fontFamily, _fontSize);
+            }
+        };
+        grpApp.Controls.Add(new Label { Text = "Font:", AutoSize = true, Location = new Point(10, 22) });
+        grpApp.Controls.Add(btnFont);
+
+        _swatchText          = MakeSwatch(s.TextColor);
+        _swatchText.Location = new Point(130, 50);
+        grpApp.Controls.Add(new Label { Text = "Text color:", AutoSize = true, Location = new Point(10, 53) });
+        grpApp.Controls.Add(_swatchText);
+
+        _swatchBg          = MakeSwatch(s.BgColor);
+        _swatchBg.Location = new Point(130, 82);
+        grpApp.Controls.Add(new Label { Text = "Background:", AutoSize = true, Location = new Point(10, 85) });
+        grpApp.Controls.Add(_swatchBg);
+
+        _nudTrans = new NumericUpDown {
+            Minimum = 10, Maximum = 100, Value = s.Transparency,
+            Width = 58, Location = new Point(130, 113),
+        };
+        grpApp.Controls.Add(new Label { Text = "Transparency:", AutoSize = true, Location = new Point(10, 116) });
+        grpApp.Controls.Add(_nudTrans);
+        grpApp.Controls.Add(new Label { Text = "%", AutoSize = true, Location = new Point(194, 116) });
+
+        // ── Buttons ───────────────────────────────────────────────────────────
         var btnOK     = new Button { Text = "OK",     Width = 80, Height = 26, DialogResult = DialogResult.OK     };
         var btnCancel = new Button { Text = "Cancel", Width = 80, Height = 26, DialogResult = DialogResult.Cancel };
         btnOK.Location     = new Point(ClientSize.Width - 90,  ClientSize.Height - 36);
@@ -185,7 +268,7 @@ class SettingsForm : Form
         AcceptButton = btnOK;
         CancelButton = btnCancel;
 
-        Controls.AddRange(new Control[] { grpMon, grpKeys, btnOK, btnCancel });
+        Controls.AddRange(new Control[] { grpMon, grpKeys, grpApp, btnOK, btnCancel });
     }
 
     static void AddRow(GroupBox grp, string label, HotkeyBox box, int y)
@@ -195,12 +278,40 @@ class SettingsForm : Form
         grp.Controls.Add(box);
     }
 
+    static Panel MakeSwatch(Color c)
+    {
+        var p = new Panel { BackColor = c, Width = 26, Height = 22,
+                            BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
+        p.Click += (s, e) => {
+            using (var dlg = new ColorDialog { Color = p.BackColor, FullOpen = true })
+                if (dlg.ShowDialog() == DialogResult.OK)
+                    p.BackColor = dlg.Color;
+        };
+        return p;
+    }
+
+    static string FormatFont(string family, float size)
+    {
+        return family + ", " + (int)size + "pt";
+    }
+
+    static Font SafeFont(string family, float size)
+    {
+        try   { return new Font(family, size); }
+        catch { return SystemFonts.DefaultFont; }
+    }
+
     public void Apply(AppSettings s)
     {
         s.UseActiveMonitor = _rbActive.Checked;
         s.ToggleHotkey     = _hbToggle.Value.ToString();
         s.CopyCloseKey     = _hbCopyClose.Value.ToString();
         s.CancelKey        = _hbCancel.Value.ToString();
+        s.FontFamily       = _fontFamily;
+        s.FontSize         = _fontSize;
+        s.TextColor        = _swatchText.BackColor;
+        s.BgColor          = _swatchBg.BackColor;
+        s.Transparency     = (int)_nudTrans.Value;
     }
 }
 
@@ -229,7 +340,6 @@ class TexterForm : Form
         FormBorderStyle = FormBorderStyle.None;
         TopMost = true; ShowInTaskbar = false;
         BackColor = Color.FromArgb(43, 43, 43);
-        Opacity = 0.97;
         Size = new Size(660, 360);
 
         var header = new Panel { Dock = DockStyle.Top, Height = 32, BackColor = Color.FromArgb(50, 50, 50) };
@@ -240,7 +350,6 @@ class TexterForm : Form
         _hint = new Label { ForeColor = Color.FromArgb(85, 85, 85), Font = new Font("Segoe UI", 8), AutoSize = true };
         header.Controls.Add(_hint);
 
-        // Re-position hint right-aligned whenever the header resizes or hint text changes
         Action reposition = () => {
             if (header.Width > 0)
                 _hint.Location = new Point(header.Width - _hint.Width - 12, (header.Height - _hint.Height) / 2);
@@ -250,8 +359,7 @@ class TexterForm : Form
 
         _tb = new RichEdit50 {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(28, 28, 28), ForeColor = Color.FromArgb(212, 212, 212),
-            Font = new Font("Segoe UI", 11), BorderStyle = BorderStyle.None,
+            BorderStyle = BorderStyle.None,
             Padding = new Padding(14, 10, 14, 10), WordWrap = true,
             ScrollBars = RichTextBoxScrollBars.Vertical,
         };
@@ -310,6 +418,12 @@ class TexterForm : Form
                            _cfg.CopyCloseKey, _cfg.CancelKey);
         var tip = "Texter  (" + _cfg.ToggleHotkey + ")";
         _tray.Text = tip.Length > 63 ? tip.Substring(0, 60) + "..." : tip;
+
+        _tb.Font      = SafeFont(_cfg.FontFamily, _cfg.FontSize);
+        _tb.ForeColor = _cfg.TextColor;
+        _tb.BackColor = _cfg.BgColor;
+        Opacity       = _cfg.Transparency / 100.0;
+
         if (reRegister) RegisterToggleHotkey();
     }
 
@@ -320,6 +434,12 @@ class TexterForm : Form
             _tray.ShowBalloonTip(4000, "Texter — hotkey conflict",
                 _cfg.ToggleHotkey + " is already in use. Use the tray icon instead.",
                 ToolTipIcon.Warning);
+    }
+
+    static Font SafeFont(string family, float size)
+    {
+        try   { return new Font(family, size); }
+        catch { return new Font("Segoe UI", 11); }
     }
 
     // ── keyboard ──────────────────────────────────────────────────────────────
