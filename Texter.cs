@@ -1,8 +1,11 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+
+// ── RichEdit 5.0 ─────────────────────────────────────────────────────────────
 
 class RichEdit50 : RichTextBox
 {
@@ -14,6 +17,195 @@ class RichEdit50 : RichTextBox
     }
 }
 
+// ── Hotkey ────────────────────────────────────────────────────────────────────
+
+struct Hotkey
+{
+    public Keys Key;
+    public bool Ctrl, Shift, Alt;
+
+    public static Hotkey Parse(string s)
+    {
+        var h = new Hotkey();
+        foreach (var part in s.Split('+'))
+        {
+            var p = part.Trim();
+            if      (p == "Ctrl")  h.Ctrl  = true;
+            else if (p == "Shift") h.Shift = true;
+            else if (p == "Alt")   h.Alt   = true;
+            else h.Key = NameToKey(p);
+        }
+        return h;
+    }
+
+    static Keys NameToKey(string s)
+    {
+        if (s.Length == 1 && s[0] >= '0' && s[0] <= '9')
+            return (Keys)((int)Keys.D0 + (s[0] - '0'));
+        if (s == "Enter") return Keys.Return;
+        Keys k;
+        return Enum.TryParse(s, true, out k) ? k : Keys.None;
+    }
+
+    public override string ToString()
+    {
+        var parts = new System.Collections.Generic.List<string>();
+        if (Ctrl)  parts.Add("Ctrl");
+        if (Alt)   parts.Add("Alt");
+        if (Shift) parts.Add("Shift");
+        parts.Add(KeyToName(Key));
+        return string.Join("+", parts.ToArray());
+    }
+
+    static string KeyToName(Keys k)
+    {
+        if (k >= Keys.D0 && k <= Keys.D9) return ((int)k - (int)Keys.D0).ToString();
+        if (k == Keys.Return) return "Enter";
+        return k.ToString();
+    }
+
+    public bool Matches(KeyEventArgs e)
+    {
+        return e.KeyCode == Key && e.Control == Ctrl && e.Shift == Shift && e.Alt == Alt;
+    }
+
+    public int WinMod {
+        get {
+            int m = 0x4000; // MOD_NOREPEAT
+            if (Ctrl)  m |= 0x0002;
+            if (Alt)   m |= 0x0001;
+            if (Shift) m |= 0x0004;
+            return m;
+        }
+    }
+
+    public int Vk { get { return (int)Key; } }
+}
+
+// ── AppSettings ───────────────────────────────────────────────────────────────
+
+class AppSettings
+{
+    static readonly string FilePath = System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "Texter", "settings.txt");
+
+    public bool   UseActiveMonitor = true;
+    public string ToggleHotkey     = "Ctrl+Shift+5";
+    public string CopyCloseKey     = "Shift+Enter";
+    public string CancelKey        = "Escape";
+
+    public static AppSettings Load()
+    {
+        var s = new AppSettings();
+        try {
+            if (!File.Exists(FilePath)) return s;
+            var ln = File.ReadAllLines(FilePath);
+            if (ln.Length > 0) s.UseActiveMonitor = ln[0] == "Active";
+            if (ln.Length > 1) s.ToggleHotkey     = ln[1];
+            if (ln.Length > 2) s.CopyCloseKey     = ln[2];
+            if (ln.Length > 3) s.CancelKey        = ln[3];
+        } catch { }
+        return s;
+    }
+
+    public void Save()
+    {
+        try {
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(FilePath));
+            File.WriteAllLines(FilePath, new[] {
+                UseActiveMonitor ? "Active" : "Primary",
+                ToggleHotkey, CopyCloseKey, CancelKey
+            });
+        } catch { }
+    }
+}
+
+// ── HotkeyBox ─────────────────────────────────────────────────────────────────
+
+class HotkeyBox : TextBox
+{
+    Hotkey _h;
+
+    public Hotkey Value {
+        get { return _h; }
+        set { _h = value; Text = value.ToString(); }
+    }
+
+    public HotkeyBox() { ReadOnly = true; Cursor = Cursors.IBeam; Width = 150; }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        e.SuppressKeyPress = true;
+        if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.ShiftKey ||
+            e.KeyCode == Keys.Menu || e.KeyCode == Keys.LWin || e.KeyCode == Keys.RWin)
+            return;
+        _h = new Hotkey { Key = e.KeyCode, Ctrl = e.Control, Shift = e.Shift, Alt = e.Alt };
+        Text = _h.ToString();
+    }
+}
+
+// ── SettingsForm ──────────────────────────────────────────────────────────────
+
+class SettingsForm : Form
+{
+    readonly RadioButton _rbActive, _rbPrimary;
+    readonly HotkeyBox   _hbToggle, _hbCopyClose, _hbCancel;
+
+    public SettingsForm(AppSettings s)
+    {
+        Text = "Texter Settings";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(360, 250);
+        Font = new Font("Segoe UI", 9);
+
+        var grpMon = new GroupBox { Text = "Monitor", Left = 12, Top = 8, Width = 336, Height = 72 };
+        _rbActive  = new RadioButton { Text = "Active monitor (where the cursor is)", AutoSize = true,
+                                       Location = new Point(12, 18), Checked =  s.UseActiveMonitor };
+        _rbPrimary = new RadioButton { Text = "Primary monitor", AutoSize = true,
+                                       Location = new Point(12, 44), Checked = !s.UseActiveMonitor };
+        grpMon.Controls.Add(_rbActive);
+        grpMon.Controls.Add(_rbPrimary);
+
+        var grpKeys = new GroupBox { Text = "Keyboard shortcuts", Left = 12, Top = 90, Width = 336, Height = 112 };
+        _hbToggle    = new HotkeyBox { Value = Hotkey.Parse(s.ToggleHotkey) };
+        _hbCopyClose = new HotkeyBox { Value = Hotkey.Parse(s.CopyCloseKey) };
+        _hbCancel    = new HotkeyBox { Value = Hotkey.Parse(s.CancelKey)    };
+        AddRow(grpKeys, "Open / hide",  _hbToggle,    16);
+        AddRow(grpKeys, "Copy & close", _hbCopyClose, 46);
+        AddRow(grpKeys, "Cancel",       _hbCancel,    76);
+
+        var btnOK     = new Button { Text = "OK",     Width = 80, Height = 26, DialogResult = DialogResult.OK     };
+        var btnCancel = new Button { Text = "Cancel", Width = 80, Height = 26, DialogResult = DialogResult.Cancel };
+        btnOK.Location     = new Point(ClientSize.Width - 90,  ClientSize.Height - 36);
+        btnCancel.Location = new Point(ClientSize.Width - 178, ClientSize.Height - 36);
+        AcceptButton = btnOK;
+        CancelButton = btnCancel;
+
+        Controls.AddRange(new Control[] { grpMon, grpKeys, btnOK, btnCancel });
+    }
+
+    static void AddRow(GroupBox grp, string label, HotkeyBox box, int y)
+    {
+        grp.Controls.Add(new Label { Text = label + ":", AutoSize = true, Location = new Point(10, y + 3) });
+        box.Location = new Point(130, y);
+        grp.Controls.Add(box);
+    }
+
+    public void Apply(AppSettings s)
+    {
+        s.UseActiveMonitor = _rbActive.Checked;
+        s.ToggleHotkey     = _hbToggle.Value.ToString();
+        s.CopyCloseKey     = _hbCopyClose.Value.ToString();
+        s.CancelKey        = _hbCancel.Value.ToString();
+    }
+}
+
+// ── TexterForm ────────────────────────────────────────────────────────────────
+
 class TexterForm : Form
 {
     [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, int mod, int vk);
@@ -22,13 +214,17 @@ class TexterForm : Form
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int sz);
 
     const int WM_HOTKEY = 0x0312, HOTKEY_ID = 9001;
-    const int MOD_CTRL = 0x0002, MOD_SHIFT = 0x0004, MOD_NOREPEAT = 0x4000, VK_5 = 0x35;
 
     readonly RichEdit50 _tb;
     readonly NotifyIcon _tray;
+    readonly Label      _hint;
+    AppSettings         _cfg;
+    Hotkey              _copyCloseHk, _cancelHk;
 
     public TexterForm()
     {
+        _cfg = AppSettings.Load();
+
         SuspendLayout();
         FormBorderStyle = FormBorderStyle.None;
         TopMost = true; ShowInTaskbar = false;
@@ -41,13 +237,16 @@ class TexterForm : Form
             Text = "Texter", ForeColor = Color.FromArgb(170, 170, 170),
             Font = new Font("Segoe UI", 9, FontStyle.Bold), AutoSize = true, Location = new Point(12, 8),
         });
-        var hint = new Label {
-            Text = "Enter = new line    Shift+Enter = copy & close    Esc = cancel",
-            ForeColor = Color.FromArgb(85, 85, 85), Font = new Font("Segoe UI", 8), AutoSize = true,
+        _hint = new Label { ForeColor = Color.FromArgb(85, 85, 85), Font = new Font("Segoe UI", 8), AutoSize = true };
+        header.Controls.Add(_hint);
+
+        // Re-position hint right-aligned whenever the header resizes or hint text changes
+        Action reposition = () => {
+            if (header.Width > 0)
+                _hint.Location = new Point(header.Width - _hint.Width - 12, (header.Height - _hint.Height) / 2);
         };
-        header.Controls.Add(hint);
-        header.Resize += (s, e) =>
-            hint.Location = new Point(header.Width - hint.Width - 12, (header.Height - hint.Height) / 2);
+        header.Resize     += (s, e) => reposition();
+        _hint.SizeChanged += (s, e) => reposition();
 
         _tb = new RichEdit50 {
             Dock = DockStyle.Fill,
@@ -61,37 +260,74 @@ class TexterForm : Form
         Controls.Add(_tb);
         Controls.Add(header);
 
-        _tray = new NotifyIcon { Text = "Texter  (Ctrl+Shift+5)", Icon = BuildTrayIcon(), Visible = true };
+        _tray = new NotifyIcon { Icon = BuildTrayIcon(), Visible = true };
         var ctx = new ContextMenuStrip();
-        ctx.Items.Add("Show / Hide  (Ctrl+Shift+5)", null, (s, e) => Toggle());
+        ctx.Items.Add("Show / Hide", null, (s, e) => Toggle());
+        ctx.Items.Add(new ToolStripSeparator());
+        ctx.Items.Add("Settings...", null, (s, e) => OpenSettings());
         ctx.Items.Add(new ToolStripSeparator());
         ctx.Items.Add("Exit", null, (s, e) => Application.Exit());
         _tray.ContextMenuStrip = ctx;
         _tray.DoubleClick += (s, e) => Toggle();
 
         ResumeLayout();
+        ApplySettings(false);
 
         HandleCreated += (s, e) => {
             int r = 2;
             DwmSetWindowAttribute(Handle, 33, ref r, sizeof(int));
-            if (!RegisterHotKey(Handle, HOTKEY_ID, MOD_CTRL | MOD_SHIFT | MOD_NOREPEAT, VK_5))
-                _tray.ShowBalloonTip(4000, "Texter — hotkey conflict",
-                    "Ctrl+Shift+5 is already in use. Open Texter from the tray icon instead.",
-                    ToolTipIcon.Warning);
+            RegisterToggleHotkey();
         };
     }
 
-    // start hidden with no taskbar flash
     protected override void SetVisibleCore(bool value)
     {
         if (!IsHandleCreated) { CreateHandle(); value = false; }
         base.SetVisibleCore(value);
     }
 
+    // ── settings ──────────────────────────────────────────────────────────────
+
+    void OpenSettings()
+    {
+        using (var dlg = new SettingsForm(_cfg))
+        {
+            if (dlg.ShowDialog() == DialogResult.OK)
+            {
+                UnregisterHotKey(Handle, HOTKEY_ID);
+                dlg.Apply(_cfg);
+                _cfg.Save();
+                ApplySettings(true);
+            }
+        }
+    }
+
+    void ApplySettings(bool reRegister)
+    {
+        _copyCloseHk = Hotkey.Parse(_cfg.CopyCloseKey);
+        _cancelHk    = Hotkey.Parse(_cfg.CancelKey);
+        _hint.Text   = string.Format("Enter = new line    {0} = copy & close    {1} = cancel",
+                           _cfg.CopyCloseKey, _cfg.CancelKey);
+        var tip = "Texter  (" + _cfg.ToggleHotkey + ")";
+        _tray.Text = tip.Length > 63 ? tip.Substring(0, 60) + "..." : tip;
+        if (reRegister) RegisterToggleHotkey();
+    }
+
+    void RegisterToggleHotkey()
+    {
+        var hk = Hotkey.Parse(_cfg.ToggleHotkey);
+        if (!RegisterHotKey(Handle, HOTKEY_ID, hk.WinMod, hk.Vk))
+            _tray.ShowBalloonTip(4000, "Texter — hotkey conflict",
+                _cfg.ToggleHotkey + " is already in use. Use the tray icon instead.",
+                ToolTipIcon.Warning);
+    }
+
+    // ── keyboard ──────────────────────────────────────────────────────────────
+
     void OnKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Shift && e.KeyCode == Keys.Enter) { CopyAndClose(); e.SuppressKeyPress = true; }
-        else if (e.KeyCode == Keys.Escape)      { Hide();         e.SuppressKeyPress = true; }
+        if      (_copyCloseHk.Matches(e)) { CopyAndClose(); e.SuppressKeyPress = true; }
+        else if (_cancelHk.Matches(e))    { Hide();         e.SuppressKeyPress = true; }
     }
 
     void CopyAndClose()
@@ -102,11 +338,14 @@ class TexterForm : Form
         Hide();
     }
 
+    // ── show / hide ───────────────────────────────────────────────────────────
+
     void Toggle() { if (Visible) Hide(); else BringUp(); }
 
     void BringUp()
     {
-        var ws = Screen.PrimaryScreen.WorkingArea;
+        var screen = _cfg.UseActiveMonitor ? Screen.FromPoint(Cursor.Position) : Screen.PrimaryScreen;
+        var ws = screen.WorkingArea;
         Location = new Point(ws.X + (ws.Width - Width) / 2, ws.Y + (ws.Height - Height) / 2);
         Show();
         SetForegroundWindow(Handle);
@@ -126,6 +365,8 @@ class TexterForm : Form
         _tray.Visible = false;
         base.OnFormClosing(e);
     }
+
+    // ── tray icon ─────────────────────────────────────────────────────────────
 
     static Icon BuildTrayIcon()
     {
